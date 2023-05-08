@@ -16,3 +16,9 @@
 
 
     修改image.go文件中的remoteRegistryUrl和sourceRegistryUrl，修改main.go中的ReleaseInfo。
+
+
+修改记录：
+
+
+    增加raw.githubusercontent.com访问失败时的重试，增加镜像pull，retag，push时的重试。

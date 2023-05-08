@@ -7,7 +7,7 @@ import (
 )
 
 func main() {
-	kr := image.NewKubeReleaseInfo("v1.23.1")
+	kr := image.NewKubeReleaseInfo("1.25.1")
 	fmt.Println(kr)
 	kr.Run()
 }

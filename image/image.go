@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/caoyingjunz/pixiulib/exec"
 	"k8s.io/apimachinery/pkg/util/version"
@@ -16,6 +17,12 @@ import (
 const (
 	remoteRegistryUrl string = "wenchenhou"
 	sourceRegistryUrl string = "registry.cn-hangzhou.aliyuncs.com/google_containers"
+)
+
+var (
+	getURLTimes    int = 0
+	pullImageTimes int = 0
+	pushImageTimes int = 0
 )
 
 type kubeReleaseInfo struct {
@@ -134,9 +141,11 @@ func (kr *kubeReleaseInfo) getSubUnitVersions() {
 
 // 使用 kubeadm 构造 subUnitVersions
 func (kr *kubeReleaseInfo) getSubUnitVersionsViaKubeadm() error {
+	fmt.Println("start getSubUnitVersionsViaKubeadm")
 	kubeadmresp := &kubeadmResp{}
+	mainVersion := fmt.Sprintf("--kubernetes-version=%s", kr.kubeVersion)
 
-	out, err := kr.exec.Command("kubeadm", "config", "images", "list", "--kubernetes-version=v1.23.0", "-o=json").CombinedOutput()
+	out, err := kr.exec.Command("kubeadm", "config", "images", "list", mainVersion, "-o=json").CombinedOutput()
 	if err != nil {
 		// kubeadm 获取失败时，使用 constantsUrl 解析版本
 		fmt.Println("get subUnitVersions via kubeadm failed")
@@ -148,7 +157,13 @@ func (kr *kubeReleaseInfo) getSubUnitVersionsViaKubeadm() error {
 		}
 	}
 
-	err = json.Unmarshal(out, kubeadmresp)
+	// 高版本的 kubernetes 会在返回里多一些无用的信息，去除掉，不然会导致 parse 失败
+	_, after, found := strings.Cut(string(out), "{")
+	if !found {
+		return errors.New("get error info from kubeadm")
+	}
+	fullInfo := "{\n" + after
+	err = json.Unmarshal([]byte(fullInfo), kubeadmresp)
 	if err != nil {
 		fmt.Println("kubeadmresp unmarshal failed")
 		fmt.Println(err)
@@ -171,6 +186,7 @@ func (kr *kubeReleaseInfo) getSubUnitVersionsViaKubeadm() error {
 
 // 使用 constantsUrl 构造 subUnitVersions
 func (kr *kubeReleaseInfo) getSubUnitVersionsViaConstantsUrl() error {
+	fmt.Println("start getSubUnitVersionsViaConstantsUrl")
 	infos := make(map[string]string)
 	v, _ := version.ParseGeneric(kr.kubeVersion)
 	fmt.Println(v)
@@ -191,10 +207,24 @@ func (kr *kubeReleaseInfo) getSubUnitVersionsViaConstantsUrl() error {
 // 解析 constantsUrl 文件，获取 subUnitVersions
 // 因为国内访问 raw.githubusercontent.com 有概率失败，增加重试操作
 func (kr *kubeReleaseInfo) getImageVersions(ver *version.Version, images map[string]string) error {
-	constants, err := kr.getFromURL()
-	if err != nil {
-		return err
+	var constants string
+	var err error
+
+	for getURLTimes < 5 {
+		constants, err = kr.getFromURL()
+		if err != nil {
+			fmt.Println(err)
+			fmt.Println("will auto retry")
+		}
+		if constants != "" {
+			break
+		}
 	}
+
+	if constants == "" {
+		panic(errors.New("can't get any info from url"))
+	}
+
 	lines := strings.Split(constants, "\n")
 
 	// map[coredns:v1.8.6 etcd:3.5.1-0 kube-apiserver:v1.23.0 kube-controller-manager:v1.23.0
@@ -272,7 +302,11 @@ func (wc *writeCounter) Write(p []byte) (int, error) {
 // 使用 http 客户端的方式拉取 constantsUrl 的信息
 func (kr *kubeReleaseInfo) getFromURL() (string, error) {
 	url := kr.constantsUrl
-	client := http.Client{}
+	t := time.Duration(time.Duration(10) * time.Second)
+	client := http.Client{
+		Timeout: t,
+	}
+	getURLTimes += 1
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -340,27 +374,40 @@ func (kr *kubeReleaseInfo) checkDockerHub() {
 func (kr *kubeReleaseInfo) imageManageProcess() {
 	for unitName, exist := range kr.subUnitExist {
 		if !exist {
-			pullErr := kr.pullFromSourceRegistry(unitName)
-			if pullErr != nil {
-				// TODO:
-				fmt.Println()
+			// pullErr := kr.pullFromSourceRegistry(unitName)
+			// if pullErr != nil {
+			// 	// TODO:
+			// 	fmt.Println()
+			// }
+			for pullImageTimes < 5 {
+				pullErr := kr.pullFromSourceRegistry(unitName)
+				if pullErr == nil {
+					break
+				}
+				fmt.Printf("pull image: %s failed, will retry pull image", unitName)
 			}
+
 			retagErr := kr.retagImage(unitName)
 			if retagErr != nil {
-				// TODO:
-				fmt.Println()
+				panic(errors.New("retag failed, maybe pull image failed, please check"))
 			}
-			pushErr := kr.pushToRemoteRegistry(unitName)
-			if pushErr != nil {
-				// TODO:
-				fmt.Println()
+
+			for pushImageTimes < 5 {
+				pushErr := kr.pushToRemoteRegistry(unitName)
+				if pushErr == nil {
+					break
+				}
+				fmt.Printf("push image: %s failed, will retry push image", unitName)
 			}
+		} else {
+			continue
 		}
 	}
 }
 
 func (kr *kubeReleaseInfo) pullFromSourceRegistry(unitName string) error {
 	// docker image pull registry.cn-hangzhou.aliyuncs.com/google_containers/ingress-nginx/controller:v1.1.1
+	pullImageTimes += 1
 	out, err := kr.exec.Command("docker", "image", "pull", kr.sourceImageInfo[unitName]).CombinedOutput()
 	if err != nil {
 		fmt.Println("docker image pull failed, err: ", err)
@@ -381,6 +428,7 @@ func (kr *kubeReleaseInfo) retagImage(unitName string) error {
 }
 
 func (kr *kubeReleaseInfo) pushToRemoteRegistry(unitName string) error {
+	pushImageTimes += 1
 	// docker image push wenchenhou/coredns:v1.8.6
 	out, err := kr.exec.Command("docker", "image", "push", kr.remoteImageInfo[unitName]).CombinedOutput()
 	if err != nil {
