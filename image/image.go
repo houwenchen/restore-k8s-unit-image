@@ -368,17 +368,13 @@ func (kr *kubeReleaseInfo) checkDockerHub() {
 }
 
 // 实现镜像下载，修改 tag ，转存到dockerhub
-// TODO: 需要增加 handleErr 的逻辑
-// 这个逻辑需要考虑的比较多，介入的时间点，以及重做的位置的定位
-// 思路：开启一个死循环，以是否所有的操作均完成为判断标准，每个操作 err 的时候就会有一个信号产生
+// 增加 retry 机制
 func (kr *kubeReleaseInfo) imageManageProcess() {
 	for unitName, exist := range kr.subUnitExist {
 		if !exist {
-			// pullErr := kr.pullFromSourceRegistry(unitName)
-			// if pullErr != nil {
-			// 	// TODO:
-			// 	fmt.Println()
-			// }
+			pullImageTimes = 0
+			pushImageTimes = 0
+
 			for pullImageTimes < 5 {
 				pullErr := kr.pullFromSourceRegistry(unitName)
 				if pullErr == nil {
